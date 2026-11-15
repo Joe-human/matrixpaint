@@ -18,6 +18,15 @@ export const metadata: Metadata = {
   title: "MatrixPaint — B2B SaaS POS & Inventory",
   description: "Sistem POS dan Inventory Multi-Cabang Toko Cat Dunia Warna",
   manifest: "/manifest.json",
+  icons: {
+    icon: [
+      { url: "/icons/icon-192x192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icons/icon-512x512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: [
+      { url: "/icons/apple-touch-icon.png", sizes: "180x180", type: "image/png" },
+    ],
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
@@ -44,13 +53,13 @@ export default function RootLayout({
       lang="id"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="h-full bg-slate-950 text-slate-100">
-        <div className="flex h-screen overflow-hidden">
+      <body className="h-full bg-slate-50 text-slate-900">
+        <div className="flex h-dvh overflow-hidden">
           {/* Sidebar Global di Kiri */}
           <Sidebar />
 
           {/* Area Konten Utama di Kanan */}
-          <main className="flex-1 overflow-y-auto">
+          <main className="flex-1 min-w-0 overflow-y-auto">
             {children}
           </main>
         </div>

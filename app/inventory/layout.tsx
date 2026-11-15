@@ -1,16 +1,23 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 
 export default function InventoryLayout({ children }: { children: React.ReactNode }) {
+  const router = useRouter()
   const [authorized, setAuthorized] = useState(false)
 
   useEffect(() => {
+    let isMounted = true
+
     const checkAccess = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
+      const {
+        data: { session },
+      } = await supabase.auth.getSession()
+
       if (!session) {
-        window.location.href = '/login'
+        router.replace('/login')
         return
       }
 
@@ -20,19 +27,27 @@ export default function InventoryLayout({ children }: { children: React.ReactNod
         .eq('email', session.user.email)
         .single()
 
+      if (!isMounted) return
+
       const role = userData?.role?.toLowerCase()
 
-      // HANYA Staf Gudang (Owner dilarang masuk ke sini)
       if (role !== 'inventory') {
-        alert('Akses Ditolak! Portal Gudang khusus untuk Staff Inventory.')
-        redirectToRoleHome(role)
-      } else {
-        setAuthorized(true)
+        if (role === 'owner') router.replace('/dashboard/owner')
+        else if (role === 'admin') router.replace('/dashboard/admin')
+        else if (role === 'cashier') router.replace('/pos')
+        else router.replace('/login')
+        return
       }
+
+      setAuthorized(true)
     }
 
     checkAccess()
-  }, [])
+
+    return () => {
+      isMounted = false
+    }
+  }, [router])
 
   if (!authorized) {
     return <LoadingScreen title="Menyiapkan Portal Gudang..." />
@@ -41,18 +56,11 @@ export default function InventoryLayout({ children }: { children: React.ReactNod
   return <>{children}</>
 }
 
-function redirectToRoleHome(role?: string) {
-  if (role === 'owner') window.location.href = '/dashboard/owner'
-  else if (role === 'admin') window.location.href = '/dashboard/admin'
-  else if (role === 'cashier') window.location.href = '/pos'
-  else window.location.href = '/login'
-}
-
 function LoadingScreen({ title }: { title: string }) {
   return (
-    <div className="h-screen w-full flex flex-col items-center justify-center bg-slate-950 text-white font-sans space-y-3">
-      <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-      <p className="text-xs font-semibold tracking-wide text-slate-400">{title}</p>
+    <div className="min-h-dvh w-full flex flex-col items-center justify-center bg-slate-50 text-slate-800 font-sans space-y-3 px-4">
+      <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
+      <p className="text-xs font-semibold tracking-wide text-slate-500 text-center">{title}</p>
     </div>
   )
 }

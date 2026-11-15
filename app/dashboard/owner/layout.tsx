@@ -1,57 +1,98 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
+import { ShieldAlert } from 'lucide-react'
 
 export default function OwnerLayout({ children }: { children: React.ReactNode }) {
-  const [authorized, setAuthorized] = useState(false)
+  const router = useRouter()
+  const [status, setStatus] = useState<'checking' | 'authorized' | 'denied'>('checking')
 
   useEffect(() => {
+    let isMounted = true
+
     const checkAccess = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session) {
-        window.location.href = '/login'
-        return
-      }
+      try {
+        const { data: { session } } = await supabase.auth.getSession()
 
-      const { data: userData } = await supabase
-        .from('users')
-        .select('role')
-        .eq('email', session.user.email)
-        .single()
+        if (!session?.user?.email) {
+          if (isMounted) router.replace('/login')
+          return
+        }
 
-      const role = userData?.role?.toLowerCase()
+        const { data: userData, error } = await supabase
+          .from('users')
+          .select('role')
+          .eq('email', session.user.email)
+          .single()
 
-      if (role !== 'owner') {
-        alert('Akses Ditolak! Area ini khusus Owner.')
-        redirectToRoleHome(role)
-      } else {
-        setAuthorized(true)
+        if (error || !userData) {
+          if (isMounted) router.replace('/login')
+          return
+        }
+
+        const role = userData.role?.toLowerCase().trim()
+
+        if (role !== 'owner') {
+          if (isMounted) setStatus('denied')
+          setTimeout(() => {
+            if (isMounted) redirectToRoleHome(role, router)
+          }, 1200)
+        } else {
+          if (isMounted) setStatus('authorized')
+        }
+      } catch {
+        if (isMounted) router.replace('/login')
       }
     }
 
     checkAccess()
-  }, [])
 
-  if (!authorized) {
+    return () => {
+      isMounted = false
+    }
+  }, [router])
+
+  if (status === 'checking') {
     return <LoadingScreen title="Memeriksa Otorisasi Owner..." />
+  }
+
+  if (status === 'denied') {
+    return <AccessDeniedScreen />
   }
 
   return <>{children}</>
 }
 
-function redirectToRoleHome(role?: string) {
-  if (role === 'admin') window.location.href = '/dashboard/admin'
-  else if (role === 'cashier') window.location.href = '/pos'
-  else if (role === 'inventory') window.location.href = '/inventory'
-  else window.location.href = '/login'
+function redirectToRoleHome(role: string | undefined, router: ReturnType<typeof useRouter>) {
+  if (role === 'admin') router.replace('/dashboard/admin')
+  else if (role === 'cashier' || role === 'kasir') router.replace('/pos')
+  else if (role === 'inventory') router.replace('/inventory')
+  else router.replace('/login')
 }
 
 function LoadingScreen({ title }: { title: string }) {
   return (
-    <div className="h-screen w-full flex flex-col items-center justify-center bg-slate-950 text-white font-sans space-y-3">
-      <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-      <p className="text-xs font-semibold tracking-wide text-slate-400">{title}</p>
+    <div className="min-h-[100dvh] w-full flex flex-col items-center justify-center bg-slate-50 px-4 text-center select-none">
+      <div className="w-9 h-9 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-3" />
+      <p className="text-xs sm:text-sm font-semibold tracking-wide text-slate-600">{title}</p>
+    </div>
+  )
+}
+
+function AccessDeniedScreen() {
+  return (
+    <div className="min-h-[100dvh] w-full flex flex-col items-center justify-center bg-slate-50 px-4 text-center">
+      <div className="bg-white border border-rose-200 rounded-2xl p-6 max-w-xs w-full shadow-sm space-y-2.5">
+        <div className="w-11 h-11 rounded-full bg-rose-50 text-rose-600 flex items-center justify-center mx-auto">
+          <ShieldAlert className="w-6 h-6" />
+        </div>
+        <h2 className="text-sm font-bold text-slate-900">Akses Ditolak</h2>
+        <p className="text-xs text-slate-500">
+          Area ini khusus untuk akun Owner. Mengalihkan ke halaman utama Anda...
+        </p>
+      </div>
     </div>
   )
 }

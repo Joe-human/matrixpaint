@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
 import {
   PackageCheck,
@@ -11,10 +11,14 @@ import {
   RefreshCw,
   Loader2,
   Boxes,
+  AlertCircle,
+  X,
+  MapPin,
 } from 'lucide-react'
 
 interface IncomingTransfer {
   id: string
+  parent_id: string
   reference_no: string
   qty: number
   status: string
@@ -28,154 +32,199 @@ export default function GoodsReceiptPage() {
   const [activeTab, setActiveTab] = useState<'interbranch' | 'supplier'>('interbranch')
   const [incomingList, setIncomingList] = useState<IncomingTransfer[]>([])
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [processingId, setProcessingId] = useState<string | null>(null)
-  const [staffInfo, setStaffInfo] = useState<{ id: string; outletId: string; outletName: string } | null>(null)
+  const [staffInfo, setStaffInfo] = useState<{
+    id: string
+    outletId: string
+    outletName: string
+  } | null>(null)
 
-  useEffect(() => {
-    initPage()
-  }, [])
+  // Modal konfirmasi & feedback banner
+  const [confirmItem, setConfirmItem] = useState<IncomingTransfer | null>(null)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(
+    null
+  )
 
-  useEffect(() => {
-    if (staffInfo) {
-      fetchIncomingItems(staffInfo.outletId)
-    }
-  }, [activeTab])
-
-  const initPage = async () => {
-    try {
-      setLoading(true)
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session) return
-
-      const { data: userData } = await supabase
-        .from('users')
-        .select('id, outlet_id, outlets(name)')
-        .eq('email', session.user.email)
-        .single()
-
-      if (userData && userData.outlet_id) {
-        const outletData = {
-          id: userData.id,
-          outletId: userData.outlet_id,
-          outletName: (userData.outlets as any)?.name || 'Cabang Store',
-        }
-        setStaffInfo(outletData)
-        fetchIncomingItems(outletData.outletId)
-      }
-    } catch (err) {
-      console.error('Error init page:', err)
-    } finally {
-      setLoading(false)
-    }
+  const showFeedback = (type: 'success' | 'error', message: string) => {
+    setFeedback({ type, message })
+    setTimeout(() => {
+      setFeedback((prev) => (prev?.message === message ? null : prev))
+    }, 5000)
   }
 
-  const fetchIncomingItems = async (outletId: string) => {
-    setLoading(true)
-    try {
-      if (activeTab === 'interbranch') {
-        // Fetch Transfer Antar Cabang (Kode Asli Kamu)
-        const { data } = await supabase
-          .from('stock_transfers')
-          .select(`
-            id,
-            qty,
-            status,
-            created_at,
-            from_outlet:outlets!stock_transfers_from_outlet_id_fkey(name),
-            products(id, name, sku, unit)
-          `)
-          .eq('to_outlet_id', outletId)
-          .in('status', ['approved', 'completed'])
-          .order('created_at', { ascending: false })
+  const fetchIncomingItems = useCallback(
+    async (outletId: string, tab: 'interbranch' | 'supplier', isManual = false) => {
+      if (isManual) setRefreshing(true)
+      else setLoading(true)
 
-        if (data) {
-          const formatted: IncomingTransfer[] = data.map((item: any) => ({
-            id: item.id,
-            reference_no: `TRF-${item.id.slice(0, 6).toUpperCase()}`,
-            qty: item.qty,
-            status: item.status,
-            created_at: item.created_at,
-            source_name: item.from_outlet?.name || 'Pusat/Cabang',
-            type: 'interbranch',
-            products: item.products,
-          }))
-          setIncomingList(formatted)
-        }
-      } else {
-        // Fetch Barang Masuk dari Supplier (Purchase Order)
-        const { data } = await supabase
-          .from('po_items')
-          .select(`
-            id,
-            quantity,
-            purchase_orders!inner(
+      try {
+        if (tab === 'interbranch') {
+          const { data, error } = await supabase
+            .from('stock_transfers')
+            .select(`
               id,
-              po_number,
+              qty,
               status,
               created_at,
-              outlet_id,
-              suppliers(name)
-            ),
-            products(id, name, sku, unit)
-          `)
-          .eq('purchase_orders.outlet_id', outletId)
-          .order('created_at', { ascending: false })
+              from_outlet:outlets!stock_transfers_from_outlet_id_fkey(name),
+              products(id, name, sku, unit)
+            `)
+            .eq('to_outlet_id', outletId)
+            .in('status', ['approved', 'completed'])
+            .order('created_at', { ascending: false })
 
-        if (data) {
-          const formatted: IncomingTransfer[] = data.map((item: any) => ({
-            id: item.id,
-            reference_no: item.purchase_orders?.po_number || 'PO-VENDOR',
-            qty: item.quantity,
-            status: item.purchase_orders?.status || 'pending',
-            created_at: item.purchase_orders?.created_at,
-            source_name: item.purchase_orders?.suppliers?.name || 'Vendor Luar',
-            type: 'supplier',
-            products: item.products,
-          }))
-          setIncomingList(formatted)
+          if (error) throw error
+
+          if (data) {
+            const formatted: IncomingTransfer[] = data.map((item: any) => ({
+              id: item.id,
+              parent_id: item.id,
+              reference_no: `TRF-${item.id.slice(0, 6).toUpperCase()}`,
+              qty: Number(item.qty || 0),
+              status: item.status,
+              created_at: item.created_at,
+              source_name: item.from_outlet?.name || 'Pusat / Cabang',
+              type: 'interbranch',
+              products: item.products,
+            }))
+            setIncomingList(formatted)
+          }
+        } else {
+          const { data, error } = await supabase
+            .from('po_items')
+            .select(`
+              id,
+              quantity,
+              purchase_orders!inner(
+                id,
+                po_number,
+                status,
+                created_at,
+                outlet_id,
+                suppliers(name)
+              ),
+              products(id, name, sku, unit)
+            `)
+            .eq('purchase_orders.outlet_id', outletId)
+            .neq('purchase_orders.status', 'cancelled')
+            .order('created_at', { ascending: false })
+
+          if (error) throw error
+
+          if (data) {
+            const formatted: IncomingTransfer[] = data.map((item: any) => ({
+              id: item.id,
+              parent_id: item.purchase_orders?.id || item.id,
+              reference_no: item.purchase_orders?.po_number || 'PO-VENDOR',
+              qty: Number(item.quantity || 0),
+              status: item.purchase_orders?.status || 'ordered',
+              created_at: item.purchase_orders?.created_at,
+              source_name: item.purchase_orders?.suppliers?.name || 'Vendor Luar',
+              type: 'supplier',
+              products: item.products,
+            }))
+            setIncomingList(formatted)
+          }
         }
+      } catch (err) {
+        console.error('Error fetching incoming items:', err)
+      } finally {
+        setLoading(false)
+        setRefreshing(false)
       }
-    } catch (err) {
-      console.error('Error fetching items:', err)
-    } finally {
-      setLoading(false)
+    },
+    []
+  )
+
+  useEffect(() => {
+    let isMounted = true
+
+    const initPage = async () => {
+      try {
+        setLoading(true)
+        const {
+          data: { session },
+        } = await supabase.auth.getSession()
+        if (!session) return
+
+        const { data: userData } = await supabase
+          .from('users')
+          .select('id, outlet_id, outlets(name)')
+          .eq('email', session.user.email)
+          .single()
+
+        if (!isMounted) return
+
+        if (userData && userData.outlet_id) {
+          const outletData = {
+            id: userData.id,
+            outletId: userData.outlet_id,
+            outletName: (userData.outlets as any)?.name || 'Cabang Store',
+          }
+          setStaffInfo(outletData)
+          await fetchIncomingItems(outletData.outletId, 'interbranch')
+        } else {
+          setLoading(false)
+        }
+      } catch (err) {
+        console.error('Error init page:', err)
+        if (isMounted) setLoading(false)
+      }
+    }
+
+    initPage()
+
+    return () => {
+      isMounted = false
+    }
+  }, [fetchIncomingItems])
+
+  const handleTabChange = (tab: 'interbranch' | 'supplier') => {
+    setActiveTab(tab)
+    if (staffInfo) {
+      fetchIncomingItems(staffInfo.outletId, tab)
     }
   }
 
-  const handleConfirmReceipt = async (item: IncomingTransfer) => {
-    if (!staffInfo || !item.products) return
-    const confirmReceive = confirm(
-      `Konfirmasi penerimaan "${item.products.name}" sebanyak ${item.qty} ${item.products.unit || 'unit'}? Stok gudang akan otomatis bertambah.`
-    )
-    if (!confirmReceive) return
+  const executeConfirmReceipt = async () => {
+    if (!confirmItem || !staffInfo || !confirmItem.products) return
+    const item = confirmItem
+    const product = confirmItem.products
 
     try {
       setProcessingId(item.id)
 
       // 1. Tambahkan stok barang ke outlet_stocks cabang tujuan
-      const { data: existingStock } = await supabase
+      const { data: existingStock, error: fetchStockErr } = await supabase
         .from('outlet_stocks')
         .select('stock')
         .eq('outlet_id', staffInfo.outletId)
-        .eq('product_id', item.products.id)
+        .eq('product_id', product.id)
         .maybeSingle()
+
+      if (fetchStockErr) throw fetchStockErr
 
       if (existingStock) {
         const newStock = Number(existingStock.stock || 0) + Number(item.qty)
-        await supabase
+        const { error: updStockErr } = await supabase
           .from('outlet_stocks')
           .update({ stock: newStock })
           .eq('outlet_id', staffInfo.outletId)
-          .eq('product_id', item.products.id)
+          .eq('product_id', product.id)
+
+        if (updStockErr) throw updStockErr
       } else {
-        await supabase.from('outlet_stocks').insert([
+        const { error: insStockErr } = await supabase.from('outlet_stocks').insert([
           {
             outlet_id: staffInfo.outletId,
-            product_id: item.products.id,
+            product_id: product.id,
             stock: item.qty,
             min_stock: 3,
           },
         ])
+
+        if (insStockErr) throw insStockErr
       }
 
       // 2. Ubah status transaksi (Transfer -> completed | PO -> received)
@@ -190,150 +239,326 @@ export default function GoodsReceiptPage() {
         const { error: updateError } = await supabase
           .from('purchase_orders')
           .update({ status: 'received' })
-          .eq('po_number', item.reference_no)
+          .eq('id', item.parent_id)
 
         if (updateError) throw updateError
       }
 
-      alert('BERHASIL: Barang telah diterima dan stok gudang resmi diperbarui!')
-      fetchIncomingItems(staffInfo.outletId)
+      showFeedback(
+        'success',
+        `Penerimaan "${product.name}" (+${item.qty} ${
+          product.unit || 'unit'
+        }) dikonfirmasi! Stok gudang diperbarui.`
+      )
+      setConfirmItem(null)
+      await fetchIncomingItems(staffInfo.outletId, activeTab)
     } catch (err: any) {
-      alert(`Gagal mengonfirmasi penerimaan: ${err.message}`)
+      showFeedback('error', `Gagal mengonfirmasi penerimaan: ${err.message || 'Terjadi kesalahan'}`)
+      setConfirmItem(null)
     } finally {
       setProcessingId(null)
     }
   }
 
   return (
-    <div className="p-4 sm:p-6 lg:p-8 max-w-6xl mx-auto space-y-6">
-      
-      {/* Header Info Outlet */}
-      <div className="bg-slate-900 border border-slate-800 p-5 sm:p-6 rounded-2xl shadow-xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <div>
-          <h1 className="text-xl font-black text-white tracking-wider flex items-center gap-2">
-            <PackageCheck className="w-6 h-6 text-blue-500" />
-            PENERIMAAN BARANG MASUK
+    <div className="p-3 min-[375px]:p-4 sm:p-6 lg:p-8 pb-24 md:pb-8 max-w-7xl mx-auto space-y-5 sm:space-y-6">
+      {/* HEADER INFO OUTLET */}
+      <div className="bg-white border border-slate-200/90 p-4 min-[375px]:p-5 sm:p-6 rounded-2xl shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3.5">
+        <div className="min-w-0">
+          <h1 className="text-lg min-[375px]:text-xl sm:text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
+            <PackageCheck className="w-5 h-5 sm:w-6 sm:h-6 text-blue-600 shrink-0" />
+            <span>Penerimaan Barang Masuk</span>
           </h1>
-          <p className="text-xs text-slate-400 mt-1">
-            Konfirmasi fisik barang masuk ke gudang: <span className="font-semibold text-blue-400">{staffInfo?.outletName || '...'}</span>
+          <p className="text-[11px] sm:text-xs text-slate-500 mt-1 flex flex-wrap items-center gap-1.5">
+            <span>Konfirmasi fisik barang masuk ke gudang:</span>
+            <span className="inline-flex items-center gap-1 font-semibold text-blue-600">
+              <MapPin className="w-3.5 h-3.5 shrink-0" />
+              <span>{staffInfo?.outletName || '...'}</span>
+            </span>
           </p>
         </div>
+
         <button
-          onClick={() => staffInfo && fetchIncomingItems(staffInfo.outletId)}
-          className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold transition flex items-center space-x-2 border border-slate-700 cursor-pointer"
+          onClick={() => staffInfo && fetchIncomingItems(staffInfo.outletId, activeTab, true)}
+          disabled={refreshing || loading}
+          className="w-full sm:w-auto px-3.5 py-2 bg-slate-100 hover:bg-slate-200 active:scale-[0.98] text-slate-700 rounded-xl text-xs font-semibold transition inline-flex items-center justify-center gap-1.5 disabled:opacity-50 shrink-0"
         >
-          <RefreshCw className="w-3.5 h-3.5" />
-          <span>Refresh Data</span>
+          <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+          <span>{refreshing ? 'Menyinkronkan...' : 'Refresh Data'}</span>
         </button>
       </div>
 
-      {/* Tabs Menu (Transfer Cabang vs PO Supplier) */}
-      <div className="flex border-b border-slate-800 space-x-2">
+      {/* FEEDBACK BANNER */}
+      {feedback && (
+        <div
+          className={`flex items-center justify-between gap-3 px-4 py-3 rounded-2xl border text-xs font-medium ${
+            feedback.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-rose-50 border-rose-200 text-rose-800'
+          }`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            {feedback.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            )}
+            <span className="break-words">{feedback.message}</span>
+          </div>
+          <button
+            onClick={() => setFeedback(null)}
+            className="text-slate-400 hover:text-slate-700 shrink-0 p-1"
+            aria-label="Tutup notifikasi"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* TABS MENU (TRANSFER CABANG VS PO SUPPLIER) */}
+      <div className="grid grid-cols-2 sm:inline-flex bg-white p-1 rounded-2xl border border-slate-200/90 shadow-xs gap-1 w-full sm:w-auto">
         <button
-          onClick={() => setActiveTab('interbranch')}
-          className={`pb-3 px-4 text-xs sm:text-sm font-bold transition flex items-center space-x-2 border-b-2 cursor-pointer ${
+          onClick={() => handleTabChange('interbranch')}
+          className={`px-3.5 py-2.5 rounded-xl text-xs font-semibold transition inline-flex items-center justify-center gap-1.5 ${
             activeTab === 'interbranch'
-              ? 'border-blue-500 text-blue-400'
-              : 'border-transparent text-slate-400 hover:text-slate-200'
+              ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/20'
+              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
           }`}
         >
-          <Building2 className="w-4 h-4" />
-          <span>Transfer Antar Cabang</span>
+          <Building2 className="w-4 h-4 shrink-0" />
+          <span className="truncate">Transfer Cabang</span>
         </button>
 
         <button
-          onClick={() => setActiveTab('supplier')}
-          className={`pb-3 px-4 text-xs sm:text-sm font-bold transition flex items-center space-x-2 border-b-2 cursor-pointer ${
+          onClick={() => handleTabChange('supplier')}
+          className={`px-3.5 py-2.5 rounded-xl text-xs font-semibold transition inline-flex items-center justify-center gap-1.5 ${
             activeTab === 'supplier'
-              ? 'border-blue-500 text-blue-400'
-              : 'border-transparent text-slate-400 hover:text-slate-200'
+              ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/20'
+              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
           }`}
         >
-          <Truck className="w-4 h-4" />
-          <span>Dari Supplier (Purchase Order)</span>
+          <Truck className="w-4 h-4 shrink-0" />
+          <span className="truncate">PO Supplier</span>
         </button>
       </div>
 
-      {/* Data Table Container */}
-      <div className="bg-slate-900/90 border border-slate-800/80 rounded-2xl shadow-2xl overflow-hidden">
+      {/* DATA CONTAINER */}
+      <div className="bg-white border border-slate-200/90 rounded-2xl shadow-sm overflow-hidden">
+        <div className="p-4 sm:px-6 border-b border-slate-100 flex items-center justify-between gap-2">
+          <span className="font-bold text-xs sm:text-sm text-slate-800">
+            {activeTab === 'interbranch'
+              ? 'Antrean Kiriman Antar Cabang'
+              : 'Antrean Barang Masuk dari Supplier (PO)'}
+          </span>
+          <span className="text-[11px] font-semibold text-slate-400 shrink-0">
+            {incomingList.length} item
+          </span>
+        </div>
+
         {loading ? (
-          <div className="p-12 text-center text-xs text-slate-400 flex flex-col items-center justify-center space-y-3">
-            <Loader2 className="w-6 h-6 text-blue-500 animate-spin" />
-            <span>Memuat daftar barang masuk...</span>
+          <div className="p-5 space-y-3 animate-pulse">
+            {[1, 2, 3, 4].map((n) => (
+              <div key={n} className="h-20 bg-slate-100 rounded-xl" />
+            ))}
+          </div>
+        ) : incomingList.length === 0 ? (
+          <div className="text-center py-14 px-4 space-y-1.5">
+            <Boxes className="w-8 h-8 text-slate-300 mx-auto" />
+            <p className="text-xs sm:text-sm font-semibold text-slate-600">
+              Tidak ada antrean kiriman barang masuk
+            </p>
+            <p className="text-[11px] text-slate-400">
+              Kiriman yang sudah disetujui akan muncul di sini untuk dikonfirmasi.
+            </p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs sm:text-sm min-w-[650px] text-slate-300">
-              <thead>
-                <tr className="bg-slate-950/80 border-b border-slate-800 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                  <th className="py-3.5 px-4 sm:px-6">Produk</th>
-                  <th className="py-3.5 px-4 sm:px-6">
-                    {activeTab === 'interbranch' ? 'Cabang Pengirim' : 'Vendor Supplier'}
-                  </th>
-                  <th className="py-3.5 px-4 sm:px-6 text-center">Jumlah (Qty)</th>
-                  <th className="py-3.5 px-4 sm:px-6 text-center">Status Kiriman</th>
-                  <th className="py-3.5 px-4 sm:px-6 text-center">Aksi Konfirmasi</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60">
-                {incomingList.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="text-center py-12 text-slate-500 text-xs">
-                      <Boxes className="w-8 h-8 text-slate-700 mx-auto mb-2" />
-                      Tidak ada antrean kiriman barang masuk yang perlu dikonfirmasi.
-                    </td>
-                  </tr>
-                ) : (
-                  incomingList.map((item) => {
-                    const isDone = item.status === 'completed' || item.status === 'received'
-                    return (
-                      <tr key={item.id} className="hover:bg-slate-800/40 transition">
-                        <td className="py-3.5 px-4 sm:px-6 font-semibold text-white whitespace-nowrap">
+          <>
+            {/* TAMPILAN MOBILE (< 768px): CARD LIST */}
+            <div className="md:hidden divide-y divide-slate-100">
+              {incomingList.map((item) => {
+                const isDone = item.status === 'completed' || item.status === 'received'
+                const isBusy = processingId === item.id
+                return (
+                  <div key={item.id} className="p-3.5 min-[375px]:p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-mono text-[10px] font-bold text-blue-700 bg-blue-50 border border-blue-200/80 px-1.5 py-0.5 rounded">
+                            {item.reference_no}
+                          </span>
+                          {item.products?.sku && (
+                            <span className="font-mono text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
+                              {item.products.sku}
+                            </span>
+                          )}
+                        </div>
+                        <h3 className="font-bold text-xs sm:text-sm text-slate-900 mt-1.5 break-words">
                           {item.products?.name || 'Produk Cat'}
-                          <span className="block text-[10px] text-slate-500 font-mono mt-0.5">
-                            {item.products?.sku} ({item.reference_no})
+                        </h3>
+                      </div>
+
+                      {isDone ? (
+                        <span className="px-2 py-0.5 bg-emerald-50 border border-emerald-200 text-emerald-700 text-[10px] font-bold rounded-full inline-flex items-center gap-1 shrink-0">
+                          <CheckCircle2 className="w-3 h-3" /> Diterima
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 bg-amber-50 border border-amber-200 text-amber-700 text-[10px] font-bold rounded-full inline-flex items-center gap-1 shrink-0">
+                          <Clock className="w-3 h-3" /> Siap Terima
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 bg-slate-50 p-2.5 rounded-xl text-[11px]">
+                      <div className="min-w-0">
+                        <p className="text-[10px] text-slate-400">
+                          {activeTab === 'interbranch' ? 'Cabang Pengirim' : 'Vendor Supplier'}
+                        </p>
+                        <p className="font-semibold text-slate-800 truncate mt-0.5">
+                          {item.source_name}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-[10px] text-slate-400">Jumlah Masuk</p>
+                        <p className="font-extrabold text-blue-600 text-xs mt-0.5">
+                          +{item.qty} {item.products?.unit || 'kaleng'}
+                        </p>
+                      </div>
+                    </div>
+
+                    {!isDone && (
+                      <button
+                        onClick={() => setConfirmItem(item)}
+                        disabled={Boolean(processingId)}
+                        className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 active:scale-[0.99] text-white rounded-xl text-xs font-bold shadow-sm shadow-emerald-600/20 transition disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+                      >
+                        {isBusy ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                        )}
+                        <span>{isBusy ? 'Memproses...' : 'Konfirmasi Terima Barang'}</span>
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* TAMPILAN DESKTOP / TABLET (>= 768px): TABEL */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs sm:text-sm">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-500 uppercase">
+                    <th className="py-3.5 px-5">Produk</th>
+                    <th className="py-3.5 px-5">
+                      {activeTab === 'interbranch' ? 'Cabang Pengirim' : 'Vendor Supplier'}
+                    </th>
+                    <th className="py-3.5 px-5 text-center">Jumlah (Qty)</th>
+                    <th className="py-3.5 px-5 text-center">Status Kiriman</th>
+                    <th className="py-3.5 px-5 text-center">Aksi Konfirmasi</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-slate-700 text-xs">
+                  {incomingList.map((item) => {
+                    const isDone = item.status === 'completed' || item.status === 'received'
+                    const isBusy = processingId === item.id
+                    return (
+                      <tr key={item.id} className="hover:bg-slate-50/70 transition">
+                        <td className="py-3.5 px-5 font-semibold text-slate-900">
+                          <div>{item.products?.name || 'Produk Cat'}</div>
+                          <span className="block text-[10px] text-slate-400 font-mono mt-0.5">
+                            {item.products?.sku} • {item.reference_no}
                           </span>
                         </td>
-                        <td className="py-3.5 px-4 sm:px-6 text-slate-300 whitespace-nowrap font-medium">
+                        <td className="py-3.5 px-5 text-slate-700 font-medium whitespace-nowrap">
                           {item.source_name}
                         </td>
-                        <td className="py-3.5 px-4 sm:px-6 text-center font-extrabold text-blue-400 whitespace-nowrap">
-                          {item.qty} {item.products?.unit || 'kaleng'}
+                        <td className="py-3.5 px-5 text-center font-extrabold text-blue-600 whitespace-nowrap">
+                          +{item.qty} {item.products?.unit || 'kaleng'}
                         </td>
-                        <td className="py-3.5 px-4 sm:px-6 text-center whitespace-nowrap">
+                        <td className="py-3.5 px-5 text-center whitespace-nowrap">
                           {isDone ? (
-                            <span className="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-bold rounded-lg inline-flex items-center gap-1">
+                            <span className="px-2.5 py-1 bg-emerald-50 border border-emerald-200 text-emerald-700 text-[10px] font-bold rounded-full inline-flex items-center gap-1">
                               <CheckCircle2 className="w-3 h-3" /> Selesai (Diterima)
                             </span>
                           ) : (
-                            <span className="px-2.5 py-1 bg-amber-500/10 border border-amber-500/20 text-amber-400 text-[10px] font-bold rounded-lg inline-flex items-center gap-1">
+                            <span className="px-2.5 py-1 bg-amber-50 border border-amber-200 text-amber-700 text-[10px] font-bold rounded-full inline-flex items-center gap-1">
                               <Clock className="w-3 h-3" /> Siap Diterima
                             </span>
                           )}
                         </td>
-                        <td className="py-3.5 px-4 sm:px-6 text-center whitespace-nowrap">
+                        <td className="py-3.5 px-5 text-center whitespace-nowrap">
                           {isDone ? (
-                            <span className="text-xs text-emerald-400 font-semibold">✓ Terkonfirmasi</span>
+                            <span className="text-xs text-emerald-600 font-semibold">
+                              Terkonfirmasi
+                            </span>
                           ) : (
                             <button
-                              onClick={() => handleConfirmReceipt(item)}
-                              disabled={processingId === item.id}
-                              className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-emerald-600/20 transition active:scale-95 disabled:opacity-50 cursor-pointer"
+                              onClick={() => setConfirmItem(item)}
+                              disabled={Boolean(processingId)}
+                              className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold shadow-sm shadow-emerald-600/20 transition active:scale-95 disabled:opacity-50 inline-flex items-center gap-1.5"
                             >
-                              {processingId === item.id ? 'Memproses...' : 'Konfirmasi Terima Barang'}
+                              {isBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                              <span>{isBusy ? 'Memproses...' : 'Konfirmasi Terima'}</span>
                             </button>
                           )}
                         </td>
                       </tr>
                     )
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
 
+      {/* MODAL KONFIRMASI PENERIMAAN BARANG */}
+      {confirmItem && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 min-[375px]:p-4 z-50">
+          <div className="bg-white rounded-2xl p-4 min-[375px]:p-5 sm:p-6 max-w-sm w-full space-y-4 shadow-xl border border-slate-200">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+                <PackageCheck className="w-5 h-5" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-slate-900">Konfirmasi Terima Barang?</h3>
+                <p className="text-xs text-slate-500 mt-1 break-words leading-relaxed">
+                  Pastikan fisik{' '}
+                  <span className="font-bold text-slate-800">{confirmItem.products?.name}</span>{' '}
+                  sebanyak{' '}
+                  <span className="font-bold text-blue-600">
+                    {confirmItem.qty} {confirmItem.products?.unit || 'unit'}
+                  </span>{' '}
+                  sudah diterima dengan baik. Stok gudang akan otomatis bertambah.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={executeConfirmReceipt}
+                disabled={Boolean(processingId)}
+                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 active:scale-[0.99] text-white rounded-xl text-xs font-semibold transition disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+              >
+                {processingId === confirmItem.id && (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                )}
+                <span>{processingId === confirmItem.id ? 'Menyimpan...' : 'Ya, Terima Barang'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmItem(null)}
+                disabled={Boolean(processingId)}
+                className="px-4 py-2.5 bg-slate-100 text-slate-600 rounded-xl text-xs font-semibold hover:bg-slate-200 transition"
+              >
+                Batal
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

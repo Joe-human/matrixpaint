@@ -17,6 +17,7 @@ import {
   Loader2,
   MapPin,
   Calculator,
+  Fuel,
 } from 'lucide-react'
 
 interface ShiftData {
@@ -52,6 +53,7 @@ export default function POSShiftPage() {
   const [cashSales, setCashSales] = useState(0)
   const [nonCashSales, setNonCashSales] = useState(0)
   const [unpaidSales, setUnpaidSales] = useState(0)
+  const [operationalExpenses, setOperationalExpenses] = useState(0)
 
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(
     null
@@ -66,6 +68,7 @@ export default function POSShiftPage() {
 
   const fetchShiftTransactions = useCallback(
     async (startTime: string, outletId: string, cashierId: string) => {
+      // 1. Ambil transaksi penjualan selama shift
       const { data: txs } = await supabase
         .from('transactions')
         .select('total_amount, payment_method, payment_status')
@@ -92,6 +95,21 @@ export default function POSShiftPage() {
         setCashSales(cash)
         setNonCashSales(nonCash)
         setUnpaidSales(unpaid)
+      }
+
+      // 2. Ambil pengeluaran kas operasional selama shift
+      const { data: exps } = await supabase
+        .from('operational_expenses')
+        .select('amount')
+        .eq('outlet_id', outletId)
+        .eq('cashier_id', cashierId)
+        .gte('created_at', startTime)
+
+      if (exps) {
+        const totalExp = exps.reduce((sum, item) => sum + Number(item.amount || 0), 0)
+        setOperationalExpenses(totalExp)
+      } else {
+        setOperationalExpenses(0)
       }
     },
     []
@@ -186,6 +204,7 @@ export default function POSShiftPage() {
       setCashSales(0)
       setNonCashSales(0)
       setUnpaidSales(0)
+      setOperationalExpenses(0)
       showFeedback('success', 'Shift kasir berhasil dibuka! Selamat bertugas.')
       await fetchShiftTransactions(data.start_time, cashierInfo.outletId, cashierInfo.id)
     } catch (err: any) {
@@ -210,7 +229,10 @@ export default function POSShiftPage() {
   const handleConfirmCloseShift = async () => {
     if (!activeShift) return
 
-    const expectedCash = Number(activeShift.initial_cash) + cashSales
+    const expectedCash = Math.max(
+      0,
+      Number(activeShift.initial_cash) + cashSales - operationalExpenses
+    )
     const actualCash = Number(actualCashInput) || 0
 
     try {
@@ -233,6 +255,7 @@ export default function POSShiftPage() {
       setCashSales(0)
       setNonCashSales(0)
       setUnpaidSales(0)
+      setOperationalExpenses(0)
       showFeedback('success', 'Shift berhasil ditutup! Laporan rekonsiliasi kas telah tersimpan.')
     } catch (err: any) {
       setShowConfirmClose(false)
@@ -242,7 +265,9 @@ export default function POSShiftPage() {
     }
   }
 
-  const expectedCashTotal = activeShift ? Number(activeShift.initial_cash) + cashSales : 0
+  const expectedCashTotal = activeShift
+    ? Math.max(0, Number(activeShift.initial_cash) + cashSales - operationalExpenses)
+    : 0
   const actualCashNum = Number(actualCashInput) || 0
   const cashDifference = actualCashNum - expectedCashTotal
 
@@ -250,8 +275,8 @@ export default function POSShiftPage() {
     return (
       <div className="p-4 sm:p-8 max-w-5xl mx-auto space-y-5 animate-pulse">
         <div className="h-20 bg-white rounded-2xl border border-slate-200" />
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          {[1, 2, 3, 4].map((n) => (
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+          {[1, 2, 3, 4, 5].map((n) => (
             <div key={n} className="h-24 bg-white rounded-2xl border border-slate-200" />
           ))}
         </div>
@@ -399,8 +424,8 @@ export default function POSShiftPage() {
       ) : (
         /* STATUS SHIFT & FORM TUTUP SHIFT */
         <div className="space-y-5 sm:space-y-6">
-          {/* 4 KARTU METRIK OMZET SHIFT */}
-          <div className="grid grid-cols-1 min-[360px]:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+          {/* 5 KARTU METRIK OMZET & KAS KELUAR SHIFT */}
+          <div className="grid grid-cols-1 min-[360px]:grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-3.5">
             <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-sm flex flex-col justify-between">
               <div className="flex items-center justify-between gap-2">
                 <p className="text-[10px] font-bold text-slate-400 uppercase">Modal Awal</p>
@@ -423,6 +448,16 @@ export default function POSShiftPage() {
 
             <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-sm flex flex-col justify-between">
               <div className="flex items-center justify-between gap-2">
+                <p className="text-[10px] font-bold text-slate-400 uppercase">Kas Operasional</p>
+                <Fuel className="w-4 h-4 text-rose-500 shrink-0" />
+              </div>
+              <p className="text-base sm:text-lg font-extrabold text-rose-600 mt-2 truncate">
+                - Rp {operationalExpenses.toLocaleString('id-ID')}
+              </p>
+            </div>
+
+            <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-sm flex flex-col justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <p className="text-[10px] font-bold text-slate-400 uppercase">QRIS / Transfer</p>
                 <QrCode className="w-4 h-4 text-blue-500 shrink-0" />
               </div>
@@ -431,7 +466,7 @@ export default function POSShiftPage() {
               </p>
             </div>
 
-            <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-sm flex flex-col justify-between">
+            <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-sm flex flex-col justify-between min-[360px]:col-span-2 lg:col-span-1">
               <div className="flex items-center justify-between gap-2">
                 <p className="text-[10px] font-bold text-slate-400 uppercase">Piutang / Bon</p>
                 <FileText className="w-4 h-4 text-amber-500 shrink-0" />
@@ -467,6 +502,12 @@ export default function POSShiftPage() {
                 <span className="text-slate-500">Penjualan Tunai (Cash)</span>
                 <span className="font-semibold text-emerald-600">
                   + Rp {cashSales.toLocaleString('id-ID')}
+                </span>
+              </div>
+              <div className="flex justify-between items-center gap-2">
+                <span className="text-slate-500">Kas Operasional Keluar</span>
+                <span className="font-semibold text-rose-600">
+                  - Rp {operationalExpenses.toLocaleString('id-ID')}
                 </span>
               </div>
               <div className="border-t border-slate-200 pt-1.5 flex justify-between items-center gap-2">

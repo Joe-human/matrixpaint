@@ -21,6 +21,9 @@ import {
   CreditCard,
   FileText,
   Package,
+  Fuel,
+  PackageOpen,
+  ArrowRight,
 } from 'lucide-react'
 
 interface ProductItem {
@@ -30,12 +33,20 @@ interface ProductItem {
   brand: string
   price: number
   stock: number
-  unit?: string
+  unit: string
 }
 
 interface CartItem extends ProductItem {
   qty: number
 }
+
+const EXPENSE_CATEGORIES = [
+  'Bensin / Transportasi',
+  'Plastik & Packing',
+  'Konsumsi / Air Galon',
+  'Parkir & Retribusi',
+  'Operasional Lainnya',
+]
 
 export default function POSPage() {
   const [products, setProducts] = useState<ProductItem[]>([])
@@ -56,6 +67,21 @@ export default function POSPage() {
     null
   )
 
+  // State Modal Kas Keluar / Operasional
+  const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false)
+  const [expenseCategory, setExpenseCategory] = useState('Bensin / Transportasi')
+  const [expenseDescription, setExpenseDescription] = useState('')
+  const [expenseAmount, setExpenseAmount] = useState('')
+  const [savingExpense, setSavingExpense] = useState(false)
+
+  // State Modal Bongkar Kemasan (Konversi Kaleng/Pail -> Kg/Liter Eceran)
+  const [isConvertModalOpen, setIsConvertModalOpen] = useState(false)
+  const [sourceProductId, setSourceProductId] = useState('')
+  const [targetProductId, setTargetProductId] = useState('')
+  const [convertQtySource, setConvertQtySource] = useState('1')
+  const [convertYieldPerUnit, setConvertYieldPerUnit] = useState('5')
+  const [convertingStock, setConvertingStock] = useState(false)
+
   // State Payment
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'qris' | 'transfer' | 'piutang'>('cash')
   const [cashGiven, setCashGiven] = useState('')
@@ -70,7 +96,7 @@ export default function POSPage() {
     setFeedback({ type, message })
     setTimeout(() => {
       setFeedback((prev) => (prev?.message === message ? null : prev))
-    }, 4000)
+    }, 4500)
   }
 
   const initPOS = useCallback(async () => {
@@ -98,7 +124,7 @@ export default function POSPage() {
 
         const { data: stocksData, error } = await supabase
           .from('outlet_stocks')
-          .select('stock, products(id, sku, name, brand, price, unit)')
+          .select('stock, selling_price, products(id, sku, name, brand, price, unit)')
           .eq('outlet_id', userData.outlet_id)
 
         if (error) throw error
@@ -111,9 +137,12 @@ export default function POSPage() {
               sku: item.products.sku || '-',
               name: item.products.name,
               brand: item.products.brand || '-',
-              price: Number(item.products.price || 0),
+              price:
+                item.selling_price !== null && item.selling_price !== undefined
+                  ? Number(item.selling_price)
+                  : Number(item.products.price || 0),
               stock: Number(item.stock || 0),
-              unit: item.products.unit || 'unit',
+              unit: item.products.unit || 'pcs',
             }))
             .sort((a, b) => a.name.localeCompare(b.name))
           setProducts(formattedProducts)
@@ -135,38 +164,170 @@ export default function POSPage() {
       showFeedback('error', `Stok "${product.name}" sedang habis!`)
       return
     }
+    const defaultStep = product.stock < 1 ? Number(product.stock.toFixed(3)) : 1
+
     setCart((prev) => {
       const exist = prev.find((item) => item.id === product.id)
       if (exist) {
-        if (exist.qty >= product.stock) {
-          showFeedback('error', `Maksimal stok "${product.name}" hanya ${product.stock} ${product.unit || 'unit'}.`)
+        const nextQty = Number((exist.qty + 1).toFixed(3))
+        if (nextQty > product.stock) {
+          showFeedback(
+            'error',
+            `Maksimal stok "${product.name}" hanya ${product.stock} ${product.unit}.`
+          )
           return prev
         }
-        return prev.map((item) =>
-          item.id === product.id ? { ...item, qty: item.qty + 1 } : item
-        )
+        return prev.map((item) => (item.id === product.id ? { ...item, qty: nextQty } : item))
       }
-      return [...prev, { ...product, qty: 1 }]
+      return [...prev, { ...product, qty: defaultStep }]
     })
   }
 
-  const updateCartQty = (id: string, newQty: number) => {
-    if (newQty <= 0) {
+  const updateCartQty = (id: string, rawQty: number) => {
+    if (Number.isNaN(rawQty) || rawQty <= 0) {
       setCart((prev) => prev.filter((item) => item.id !== id))
       return
     }
+    const cleanQty = Number(rawQty.toFixed(3))
     const targetProd = products.find((p) => p.id === id)
-    if (targetProd && newQty > targetProd.stock) {
-      showFeedback('error', `Jumlah melebihi sisa stok (${targetProd.stock} ${targetProd.unit || 'unit'}).`)
+    if (targetProd && cleanQty > targetProd.stock) {
+      showFeedback(
+        'error',
+        `Jumlah melebihi sisa stok (${targetProd.stock} ${targetProd.unit}).`
+      )
       return
     }
     setCart((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, qty: newQty } : item))
+      prev.map((item) => (item.id === id ? { ...item, qty: cleanQty } : item))
     )
   }
 
-  const totalAmount = cart.reduce((sum, item) => sum + item.price * item.qty, 0)
-  const totalItemsCount = cart.reduce((sum, item) => sum + item.qty, 0)
+  // SIMPAN PENGELUARAN OPERASIONAL (BENSIN, PARKIR, PLASTIK, DLL)
+  const handleSaveExpense = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!cashierInfo) {
+      showFeedback('error', 'Sesi kasir tidak valid.')
+      return
+    }
+
+    const numericAmount = Number(expenseAmount) || 0
+    if (numericAmount <= 0 || !expenseDescription.trim()) {
+      showFeedback('error', 'Keterangan dan nominal pengeluaran wajib diisi.')
+      return
+    }
+
+    setSavingExpense(true)
+    try {
+      const { data: activeShift } = await supabase
+        .from('cashier_shifts')
+        .select('id')
+        .eq('outlet_id', cashierInfo.outletId)
+        .eq('status', 'open')
+        .order('start_time', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      const { error } = await supabase.from('operational_expenses').insert([
+        {
+          company_id: cashierInfo.companyId,
+          outlet_id: cashierInfo.outletId,
+          shift_id: activeShift?.id || null,
+          cashier_id: cashierInfo.id,
+          category: expenseCategory,
+          description: expenseDescription.trim(),
+          amount: numericAmount,
+        },
+      ])
+
+      if (error) throw error
+
+      showFeedback(
+        'success',
+        `Kas keluar "${expenseDescription.trim()}" (Rp ${numericAmount.toLocaleString('id-ID')}) tercatat!`
+      )
+      setExpenseDescription('')
+      setExpenseAmount('')
+      setIsExpenseModalOpen(false)
+    } catch (err: any) {
+      showFeedback('error', `Gagal mencatat pengeluaran: ${err.message}`)
+    } finally {
+      setSavingExpense(false)
+    }
+  }
+
+  // KONVERSI / BONGKAR KEMASAN (MISAL 1 KALENG -> 5 KG / LITER ECERAN)
+  const handleConvertStock = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!cashierInfo) return
+
+    const sourceProd = products.find((p) => p.id === sourceProductId)
+    const targetProd = products.find((p) => p.id === targetProductId)
+    const qtyOpen = Number(convertQtySource) || 0
+    const yieldEach = Number(convertYieldPerUnit) || 0
+
+    if (!sourceProd || !targetProd) {
+      showFeedback('error', 'Pilih produk kemasan asal dan produk eceran tujuan.')
+      return
+    }
+    if (sourceProd.id === targetProd.id) {
+      showFeedback('error', 'Produk kemasan asal dan produk eceran tujuan tidak boleh sama.')
+      return
+    }
+    if (qtyOpen <= 0 || yieldEach <= 0) {
+      showFeedback('error', 'Jumlah kemasan dibuka dan isi per kemasan harus lebih dari 0.')
+      return
+    }
+    if (qtyOpen > sourceProd.stock) {
+      showFeedback(
+        'error',
+        `Stok "${sourceProd.name}" tidak cukup (tersisa ${sourceProd.stock} ${sourceProd.unit}).`
+      )
+      return
+    }
+
+    setConvertingStock(true)
+    try {
+      const addedEceran = Number((qtyOpen * yieldEach).toFixed(3))
+      const newSourceStock = Number((sourceProd.stock - qtyOpen).toFixed(3))
+      const newTargetStock = Number((targetProd.stock + addedEceran).toFixed(3))
+
+      const { error: errSource } = await supabase
+        .from('outlet_stocks')
+        .update({ stock: newSourceStock })
+        .eq('outlet_id', cashierInfo.outletId)
+        .eq('product_id', sourceProd.id)
+
+      if (errSource) throw errSource
+
+      const { error: errTarget } = await supabase
+        .from('outlet_stocks')
+        .update({ stock: newTargetStock })
+        .eq('outlet_id', cashierInfo.outletId)
+        .eq('product_id', targetProd.id)
+
+      if (errTarget) throw errTarget
+
+      showFeedback(
+        'success',
+        `Berhasil bongkar ${qtyOpen} ${sourceProd.unit} "${sourceProd.name}" menjadi +${addedEceran} ${targetProd.unit} "${targetProd.name}".`
+      )
+      setIsConvertModalOpen(false)
+      setSourceProductId('')
+      setTargetProductId('')
+      setConvertQtySource('1')
+      setConvertYieldPerUnit('5')
+      await initPOS()
+    } catch (err: any) {
+      showFeedback('error', `Gagal bongkar kemasan: ${err.message}`)
+    } finally {
+      setConvertingStock(false)
+    }
+  }
+
+  const totalAmount = Math.round(
+    cart.reduce((sum, item) => sum + item.price * item.qty, 0)
+  )
+  const totalItemsCount = cart.length
   const cashValue = Number(cashGiven) || 0
   const changePreview = cashValue - totalAmount
 
@@ -221,7 +382,7 @@ export default function POSPage() {
         product_id: item.id,
         qty: item.qty,
         price: item.price,
-        subtotal: item.price * item.qty,
+        subtotal: Math.round(item.price * item.qty),
       }))
 
       const { error: itemError } = await supabase
@@ -231,20 +392,12 @@ export default function POSPage() {
       if (itemError) throw new Error(`Gagal simpan barang: ${itemError.message}`)
 
       for (const item of cart) {
-        const { error: rpcError } = await supabase.rpc('decrement_stock', {
-          p_outlet_id: cashierInfo.outletId,
-          p_product_id: item.id,
-          p_qty: item.qty,
-        })
-
-        if (rpcError) {
-          const newStock = Math.max(0, item.stock - item.qty)
-          await supabase
-            .from('outlet_stocks')
-            .update({ stock: newStock })
-            .eq('outlet_id', cashierInfo.outletId)
-            .eq('product_id', item.id)
-        }
+        const newStock = Math.max(0, Number((item.stock - item.qty).toFixed(3)))
+        await supabase
+          .from('outlet_stocks')
+          .update({ stock: newStock })
+          .eq('outlet_id', cashierInfo.outletId)
+          .eq('product_id', item.id)
       }
 
       setCompletedTx({
@@ -281,14 +434,17 @@ export default function POSPage() {
       p.brand.toLowerCase().includes(searchQuery.toLowerCase())
   )
 
+  const selectedSourceProd = products.find((p) => p.id === sourceProductId)
+  const selectedTargetProd = products.find((p) => p.id === targetProductId)
+
   return (
     <div className="relative flex flex-col lg:flex-row h-dvh bg-slate-50 text-slate-900 overflow-hidden select-none">
       {/* ------------------------------------------------------------- */}
       {/* KATALOG PRODUK (KIRI / FULLSCREEN DI MOBILE)                  */}
       {/* ------------------------------------------------------------- */}
       <div className="flex-1 p-3 min-[375px]:p-4 sm:p-6 overflow-y-auto pb-28 lg:pb-6 space-y-4">
-        {/* Top Header & Search */}
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 bg-white border border-slate-200/90 p-3.5 min-[375px]:p-4 rounded-2xl shadow-sm">
+        {/* Top Header, Tombol Bongkar Kemasan, Kas Operasional & Search */}
+        <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-3 bg-white border border-slate-200/90 p-3.5 min-[375px]:p-4 rounded-2xl shadow-sm">
           <div className="min-w-0">
             <h1 className="text-sm sm:text-base font-black tracking-wide text-slate-900 flex items-center gap-2">
               <ShoppingCart className="w-4 h-4 sm:w-5 sm:h-5 text-blue-600 shrink-0" />
@@ -306,25 +462,46 @@ export default function POSPage() {
             </p>
           </div>
 
-          <div className="relative w-full sm:w-64 lg:w-72 shrink-0">
-            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Cari SKU, nama cat, atau merek..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-8 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-blue-500 transition"
-            />
-            {searchQuery && (
-              <button
-                type="button"
-                onClick={() => setSearchQuery('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
-                aria-label="Hapus pencarian"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
+          <div className="flex flex-wrap items-center gap-2 w-full xl:w-auto">
+            <button
+              type="button"
+              onClick={() => setIsConvertModalOpen(true)}
+              className="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 rounded-xl text-xs font-bold transition inline-flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
+              title="Buka cat kaleng/pail menjadi stok kiloan/literan eceran"
+            >
+              <PackageOpen className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Bongkar Kemasan</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsExpenseModalOpen(true)}
+              className="px-3 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-bold transition inline-flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
+            >
+              <Fuel className="w-3.5 h-3.5 text-amber-600" />
+              <span>Kas Operasional</span>
+            </button>
+
+            <div className="relative flex-1 sm:w-60 lg:w-64 min-w-[180px]">
+              <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Cari SKU, nama cat, atau merek..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-8 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-blue-500 transition"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                  aria-label="Hapus pencarian"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -390,7 +567,7 @@ export default function POSPage() {
                 >
                   {inCart && (
                     <span className="absolute -top-2 -right-2 bg-blue-600 text-white text-[10px] font-black px-2 py-0.5 rounded-full shadow-sm">
-                      {inCart.qty}x
+                      {inCart.qty} {p.unit}
                     </span>
                   )}
 
@@ -409,9 +586,12 @@ export default function POSPage() {
                   </div>
 
                   <div className="mt-3 pt-2 border-t border-slate-100 flex justify-between items-center gap-1">
-                    <span className="text-xs font-black text-blue-600 truncate">
-                      Rp {p.price.toLocaleString('id-ID')}
-                    </span>
+                    <div className="truncate">
+                      <span className="text-xs font-black text-blue-600">
+                        Rp {p.price.toLocaleString('id-ID')}
+                      </span>
+                      <span className="text-[10px] text-slate-400">/{p.unit}</span>
+                    </div>
                     <span
                       className={`text-[9px] sm:text-[10px] px-1.5 py-0.5 rounded font-bold shrink-0 ${
                         p.stock > 0
@@ -509,7 +689,7 @@ export default function POSPage() {
             </div>
           </div>
 
-          {/* List Items */}
+          {/* List Items (Mendukung Input Desimal kg / liter) */}
           <div className="space-y-2 mt-3 overflow-y-auto pr-1 flex-1 min-h-[100px]">
             {cart.length === 0 ? (
               <div className="text-center py-10 space-y-1">
@@ -523,38 +703,65 @@ export default function POSPage() {
               cart.map((item) => (
                 <div
                   key={item.id}
-                  className="p-2.5 bg-slate-50 border border-slate-200/80 rounded-xl flex justify-between items-center gap-2 text-xs"
+                  className="p-2.5 bg-slate-50 border border-slate-200/80 rounded-xl space-y-2 text-xs"
                 >
-                  <div className="min-w-0 flex-1">
-                    <p className="font-bold text-slate-900 truncate">{item.name}</p>
-                    <p className="text-slate-500 text-[10px]">
-                      Rp {item.price.toLocaleString('id-ID')} / {item.unit || 'unit'}
-                    </p>
+                  <div className="flex justify-between items-start gap-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-bold text-slate-900 truncate">{item.name}</p>
+                      <p className="text-slate-500 text-[10px]">
+                        Rp {item.price.toLocaleString('id-ID')} / {item.unit}
+                      </p>
+                    </div>
+                    <span className="font-extrabold text-blue-600 text-right shrink-0">
+                      Rp {Math.round(item.qty * item.price).toLocaleString('id-ID')}
+                    </span>
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
-                    <div className="flex items-center bg-white border border-slate-200 rounded-lg overflow-hidden">
+                  <div className="flex items-center justify-between gap-2">
+                    {/* Preset Eceran Cepat untuk satuan kiloan/literan/meter */}
+                    {['kg', 'liter', 'meter'].includes(item.unit.toLowerCase()) ? (
+                      <div className="flex items-center gap-1">
+                        {[0.25, 0.5, 1].map((preset) => (
+                          <button
+                            key={preset}
+                            type="button"
+                            onClick={() => updateCartQty(item.id, preset)}
+                            className="px-1.5 py-0.5 text-[10px] font-semibold bg-white border border-slate-200 rounded hover:border-blue-400 text-slate-600"
+                          >
+                            {preset}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-[10px] text-slate-400 uppercase">{item.unit}</span>
+                    )}
+
+                    <div className="flex items-center bg-white border border-slate-200 rounded-lg overflow-hidden ml-auto">
                       <button
                         type="button"
-                        onClick={() => updateCartQty(item.id, item.qty - 1)}
+                        onClick={() => updateCartQty(item.id, Number((item.qty - 1).toFixed(3)))}
                         className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition"
                         aria-label="Kurangi"
                       >
                         <Minus className="w-3 h-3" />
                       </button>
-                      <span className="px-2 text-xs font-bold text-slate-900">{item.qty}</span>
+                      <input
+                        type="number"
+                        step="any"
+                        min="0"
+                        value={item.qty}
+                        onChange={(e) => updateCartQty(item.id, parseFloat(e.target.value))}
+                        className="w-14 text-center text-xs font-bold text-slate-900 focus:outline-none bg-transparent"
+                      />
                       <button
                         type="button"
-                        onClick={() => updateCartQty(item.id, item.qty + 1)}
+                        onClick={() => updateCartQty(item.id, Number((item.qty + 1).toFixed(3)))}
                         className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition"
                         aria-label="Tambah"
                       >
                         <Plus className="w-3 h-3" />
                       </button>
                     </div>
-                    <span className="font-extrabold text-blue-600 text-right min-w-[72px]">
-                      Rp {(item.qty * item.price).toLocaleString('id-ID')}
-                    </span>
                   </div>
                 </div>
               ))
@@ -702,6 +909,236 @@ export default function POSPage() {
       </div>
 
       {/* ------------------------------------------------------------- */}
+      {/* MODAL BONGKAR KEMASAN (KALENG / PAIL -> KG / LITER ECERAN)    */}
+      {/* ------------------------------------------------------------- */}
+      {isConvertModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 min-[375px]:p-4 z-50">
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 min-[375px]:p-5 max-w-md w-full space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <PackageOpen className="w-4 h-4 text-indigo-600" />
+                <span>Bongkar Kemasan ke Stok Eceran</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsConvertModalOpen(false)}
+                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-[11px] text-slate-500 leading-relaxed bg-indigo-50/70 border border-indigo-100 p-2.5 rounded-xl">
+              Gunakan fitur ini saat membuka cat kaleng / galon / pail untuk dijual eceran kiloan
+              atau literan. Stok kaleng otomatis berkurang dan stok eceran bertambah.
+            </p>
+
+            <form onSubmit={handleConvertStock} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">
+                  1. Produk Kemasan Utuh yang Dibuka *
+                </label>
+                <select
+                  required
+                  value={sourceProductId}
+                  onChange={(e) => setSourceProductId(e.target.value)}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:bg-white focus:border-indigo-500"
+                >
+                  <option value="">-- Pilih Kemasan Asal (Kaleng / Galon / Pail) --</option>
+                  {products
+                    .filter((p) => p.stock > 0)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} (Sisa: {p.stock} {p.unit})
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">
+                  2. Produk Eceran Tujuan (Kg / Liter) *
+                </label>
+                <select
+                  required
+                  value={targetProductId}
+                  onChange={(e) => setTargetProductId(e.target.value)}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:bg-white focus:border-indigo-500"
+                >
+                  <option value="">-- Pilih Produk Eceran Tujuan --</option>
+                  {products
+                    .filter((p) => p.id !== sourceProductId)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} (Stok saat ini: {p.stock} {p.unit})
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">
+                    Jumlah Dibuka ({selectedSourceProd?.unit || 'kemasan'}) *
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    min="0.1"
+                    required
+                    value={convertQtySource}
+                    onChange={(e) => setConvertQtySource(e.target.value)}
+                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">
+                    Isi per Kemasan ({selectedTargetProd?.unit || 'kg/L'}) *
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    min="0.1"
+                    required
+                    value={convertYieldPerUnit}
+                    onChange={(e) => setConvertYieldPerUnit(e.target.value)}
+                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:bg-white focus:border-indigo-500"
+                  />
+                </div>
+              </div>
+
+              {selectedSourceProd && selectedTargetProd && (
+                <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl flex items-center justify-between text-xs">
+                  <div>
+                    <p className="text-[10px] text-slate-400">Berkurang</p>
+                    <p className="font-bold text-rose-600">
+                      -{Number(convertQtySource) || 0} {selectedSourceProd.unit}
+                    </p>
+                  </div>
+                  <ArrowRight className="w-4 h-4 text-slate-400" />
+                  <div className="text-right">
+                    <p className="text-[10px] text-slate-400">Bertambah Eceran</p>
+                    <p className="font-bold text-emerald-600">
+                      +{((Number(convertQtySource) || 0) * (Number(convertYieldPerUnit) || 0)).toFixed(2)}{' '}
+                      {selectedTargetProd.unit}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="submit"
+                  disabled={convertingStock}
+                  className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition disabled:opacity-50 inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  {convertingStock && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>{convertingStock ? 'Memproses...' : 'Konversi Stok Sekarang'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsConvertModalOpen(false)}
+                  className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition cursor-pointer"
+                >
+                  Batal
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------- */}
+      {/* MODAL PENGELUARAN OPERASIONAL KASIR (BENSIN, PARKIR, DLL)     */}
+      {/* ------------------------------------------------------------- */}
+      {isExpenseModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 min-[375px]:p-4 z-50">
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 min-[375px]:p-5 max-w-md w-full space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <Fuel className="w-4 h-4 text-amber-600" />
+                <span>Catat Kas Keluar / Operasional</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsExpenseModalOpen(false)}
+                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveExpense} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">
+                  Kategori Pengeluaran
+                </label>
+                <select
+                  value={expenseCategory}
+                  onChange={(e) => setExpenseCategory(e.target.value)}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:bg-white focus:border-blue-500"
+                >
+                  {EXPENSE_CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">
+                  Keterangan Keperluan *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Contoh: Uang bensin motor antar cat ke pelanggan"
+                  value={expenseDescription}
+                  onChange={(e) => setExpenseDescription(e.target.value)}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:bg-white focus:border-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">
+                  Nominal Uang Keluar (Rp) *
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  required
+                  placeholder="25000"
+                  value={expenseAmount}
+                  onChange={(e) => setExpenseAmount(e.target.value)}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:bg-white focus:border-blue-500"
+                />
+              </div>
+
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="submit"
+                  disabled={savingExpense}
+                  className="flex-1 py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-bold transition disabled:opacity-50 inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  {savingExpense && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>{savingExpense ? 'Menyimpan...' : 'Simpan Pengeluaran'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsExpenseModalOpen(false)}
+                  className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition cursor-pointer"
+                >
+                  Batal
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------- */}
       {/* MODAL CETAK STRUK THERMAL                                     */}
       {/* ------------------------------------------------------------- */}
       {completedTx && (
@@ -733,10 +1170,10 @@ export default function POSPage() {
                 {completedTx.items.map((item: any, idx: number) => (
                   <div key={idx} className="flex justify-between text-[11px] text-slate-800 gap-2">
                     <span className="break-words">
-                      {item.qty}x {item.name}
+                      {item.qty} {item.unit} {item.name}
                     </span>
                     <span className="font-bold shrink-0">
-                      Rp {(item.price * item.qty).toLocaleString('id-ID')}
+                      Rp {Math.round(item.price * item.qty).toLocaleString('id-ID')}
                     </span>
                   </div>
                 ))}

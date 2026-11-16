@@ -1,7 +1,8 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
+import * as XLSX from 'xlsx'
 import {
   Boxes,
   Plus,
@@ -14,6 +15,9 @@ import {
   Loader2,
   AlertTriangle,
   Package,
+  FileSpreadsheet,
+  Upload,
+  Download,
 } from 'lucide-react'
 
 interface ProductMaster {
@@ -43,6 +47,11 @@ const CATEGORIES = [
 
 const UNITS = [
   { value: 'pcs', label: 'Pcs / Buah' },
+  { value: 'kg', label: 'Kilogram (kg)' },
+  { value: 'liter', label: 'Liter (L)' },
+  { value: 'gram', label: 'Gram (gr)' },
+  { value: 'ml', label: 'Mililiter (ml)' },
+  { value: 'meter', label: 'Meter (m)' },
   { value: 'kaleng', label: 'Kaleng' },
   { value: 'galon', label: 'Galon' },
   { value: 'pail', label: 'Pail (20L)' },
@@ -74,9 +83,14 @@ export default function MasterProductsPage() {
   const [costPrice, setCostPrice] = useState('')
   const [unit, setUnit] = useState('kaleng')
 
-  // State Stok Awal per Cabang
+  // State Stok Awal & Harga Khusus per Cabang
   const [initialStocks, setInitialStocks] = useState<Record<string, number>>({})
+  const [initialOutletPrices, setInitialOutletPrices] = useState<Record<string, string>>({})
   const [submitting, setSubmitting] = useState(false)
+
+  // State Import Excel
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [importing, setImporting] = useState(false)
 
   // State Modal Edit Produk
   const [editingProduct, setEditingProduct] = useState<ProductMaster | null>(null)
@@ -88,6 +102,7 @@ export default function MasterProductsPage() {
   const [editCostPrice, setEditCostPrice] = useState('')
   const [editUnit, setEditUnit] = useState('kaleng')
   const [editStocks, setEditStocks] = useState<Record<string, number>>({})
+  const [editOutletPrices, setEditOutletPrices] = useState<Record<string, string>>({})
   const [updating, setUpdating] = useState(false)
 
   // State Konfirmasi Hapus
@@ -98,32 +113,68 @@ export default function MasterProductsPage() {
     setFeedback({ type, message })
     setTimeout(() => {
       setFeedback((prev) => (prev?.message === message ? null : prev))
-    }, 4500)
+    }, 5000)
   }
+
+  const getAdminCompanyId = useCallback(async () => {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser()
+    if (!user) throw new Error('Sesi login tidak ditemukan, silakan login ulang.')
+
+    let companyId: string | null = null
+    const { data: profileById } = await supabase
+      .from('users')
+      .select('company_id')
+      .eq('id', user.id)
+      .maybeSingle()
+
+    if (profileById?.company_id) {
+      companyId = profileById.company_id
+    } else if (user.email) {
+      const { data: profileByEmail } = await supabase
+        .from('users')
+        .select('company_id')
+        .eq('email', user.email)
+        .maybeSingle()
+      companyId = profileByEmail?.company_id || null
+    }
+
+    if (!companyId) throw new Error('Company ID tidak ditemukan pada akun Admin ini.')
+    return companyId
+  }, [])
 
   const fetchMasterData = useCallback(async () => {
     try {
       setLoading(true)
+      const companyId = await getAdminCompanyId()
 
-      const { data: outletsData } = await supabase
+      // Ambil daftar cabang HANYA milik perusahaan/toko admin yang sedang login
+      const { data: outletsData, error: outletErr } = await supabase
         .from('outlets')
         .select('id, name')
+        .eq('company_id', companyId)
         .order('name', { ascending: true })
-      if (outletsData) setOutlets(outletsData)
 
-      const { data: productsData, error } = await supabase
+      if (outletErr) throw outletErr
+      setOutlets(outletsData || [])
+
+      // Ambil produk master HANYA milik perusahaan/toko admin yang sedang login
+      const { data: productsData, error: prodErr } = await supabase
         .from('products')
         .select('*')
+        .eq('company_id', companyId)
         .order('created_at', { ascending: false })
 
-      if (error) throw error
-      if (productsData) setProducts(productsData as ProductMaster[])
-    } catch (err) {
+      if (prodErr) throw prodErr
+      setProducts((productsData as ProductMaster[]) || [])
+    } catch (err: any) {
       console.error('Gagal mengambil katalog master:', err)
+      showFeedback('error', err.message || 'Gagal memuat data katalog perusahaan.')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [getAdminCompanyId])
 
   useEffect(() => {
     fetchMasterData()
@@ -136,11 +187,236 @@ export default function MasterProductsPage() {
     }))
   }
 
+  const handleOutletPriceChange = (outletId: string, value: string) => {
+    setInitialOutletPrices((prev) => ({
+      ...prev,
+      [outletId]: value,
+    }))
+  }
+
   const handleEditStockChange = (outletId: string, value: string) => {
     setEditStocks((prev) => ({
       ...prev,
       [outletId]: Math.max(0, Number(value) || 0),
     }))
+  }
+
+  const handleEditOutletPriceChange = (outletId: string, value: string) => {
+    setEditOutletPrices((prev) => ({
+      ...prev,
+      [outletId]: value,
+    }))
+  }
+
+  // DOWNLOAD TEMPLATE EXCEL (HANYA CABANG MILIK TOKO INI)
+  const handleDownloadTemplate = () => {
+    const sampleRow: Record<string, any> = {
+      SKU: 'CAT-OPL-KG',
+      Nama_Produk: 'Cat Tembok Oplosan Kiloan Putih',
+      Kategori: 'Cat & Coating',
+      Brand: 'Nippon Paint',
+      Satuan: 'kg',
+      Harga_Jual_Default: 35000,
+      HPP_Modal: 24000,
+    }
+    outlets.forEach((o) => {
+      sampleRow[`Stok_${o.name}`] = 25
+      sampleRow[`Harga_${o.name}`] = ''
+    })
+
+    const worksheet = XLSX.utils.json_to_sheet([sampleRow])
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Template_Katalog')
+    XLSX.writeFile(workbook, 'Template_Import_Katalog_MatrixPaint.xlsx')
+  }
+
+  // EXPORT KATALOG SAAT INI KE EXCEL (TERISOLASI PER COMPANY_ID)
+  const handleExportExcel = async () => {
+    try {
+      const outletIds = outlets.map((o) => o.id)
+
+      const { data: allStocks, error: stockErr } =
+        outletIds.length > 0
+          ? await supabase
+              .from('outlet_stocks')
+              .select('product_id, outlet_id, stock, selling_price')
+              .in('outlet_id', outletIds)
+          : { data: [], error: null }
+
+      if (stockErr) throw stockErr
+
+      const stockLookup: Record<string, { stock: number; selling_price: number | null }> = {}
+      if (allStocks) {
+        allStocks.forEach((s: any) => {
+          stockLookup[`${s.product_id}_${s.outlet_id}`] = {
+            stock: Number(s.stock || 0),
+            selling_price: s.selling_price !== null ? Number(s.selling_price) : null,
+          }
+        })
+      }
+
+      const rows = products.map((p) => {
+        const row: Record<string, any> = {
+          SKU: p.sku,
+          Nama_Produk: p.name,
+          Kategori: p.category || 'Cat & Coating',
+          Brand: p.brand || '',
+          Satuan: p.unit || 'pcs',
+          Harga_Jual_Default: Number(p.price || 0),
+          HPP_Modal: Number(p.cost_price || 0),
+        }
+        outlets.forEach((o) => {
+          const info = stockLookup[`${p.id}_${o.id}`]
+          row[`Stok_${o.name}`] = info ? info.stock : 0
+          row[`Harga_${o.name}`] = info?.selling_price ?? ''
+        })
+        return row
+      })
+
+      const worksheet = XLSX.utils.json_to_sheet(rows)
+      const workbook = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Katalog_MatrixPaint')
+      XLSX.writeFile(workbook, `Katalog_MatrixPaint_${new Date().toISOString().slice(0, 10)}.xlsx`)
+      showFeedback('success', `Berhasil export ${products.length} produk ke file Excel!`)
+    } catch (err: any) {
+      showFeedback('error', `Gagal export Excel: ${err.message}`)
+    }
+  }
+
+  // IMPORT KATALOG DARI FILE EXCEL
+  const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    setImporting(true)
+    setFeedback(null)
+
+    try {
+      const companyId = await getAdminCompanyId()
+      const buffer = await file.arrayBuffer()
+      const workbook = XLSX.read(buffer, { type: 'array' })
+      const sheetName = workbook.SheetNames[0]
+      const rawRows = XLSX.utils.sheet_to_json<Record<string, any>>(workbook.Sheets[sheetName])
+
+      if (!rawRows || rawRows.length === 0) {
+        throw new Error('File Excel kosong atau tidak memiliki baris data.')
+      }
+
+      let successCount = 0
+
+      for (const row of rawRows) {
+        const rawSku = String(row.SKU || row.sku || '').trim().toUpperCase()
+        const rawName = String(row.Nama_Produk || row.nama_produk || row.Name || row.name || '').trim()
+        if (!rawSku || !rawName) continue
+
+        const rawCategory = String(row.Kategori || row.category || 'Cat & Coating').trim()
+        const rawBrand = String(row.Brand || row.brand || '').trim()
+        const rawUnit = String(row.Satuan || row.unit || 'pcs').trim().toLowerCase()
+        const rawPrice = Number(row.Harga_Jual_Default ?? row.Harga_Jual ?? row.price ?? 0) || 0
+        const rawCost = Number(row.HPP_Modal ?? row.HPP ?? row.cost_price ?? 0) || 0
+
+        // Cek apakah SKU sudah ada di perusahaan ini
+        const { data: existingProd } = await supabase
+          .from('products')
+          .select('id')
+          .eq('company_id', companyId)
+          .eq('sku', rawSku)
+          .maybeSingle()
+
+        let productId = existingProd?.id
+
+        if (productId) {
+          await supabase
+            .from('products')
+            .update({
+              name: rawName,
+              category: rawCategory,
+              brand: rawBrand,
+              unit: rawUnit,
+              price: rawPrice,
+              cost_price: rawCost,
+            })
+            .eq('id', productId)
+        } else {
+          const { data: insertedProd, error: insErr } = await supabase
+            .from('products')
+            .insert([
+              {
+                company_id: companyId,
+                sku: rawSku,
+                name: rawName,
+                category: rawCategory,
+                brand: rawBrand,
+                unit: rawUnit,
+                price: rawPrice,
+                cost_price: rawCost,
+              },
+            ])
+            .select('id')
+            .single()
+
+          if (insErr) throw insErr
+          productId = insertedProd.id
+        }
+
+        // Update stok & harga per cabang milik toko ini
+        for (const outlet of outlets) {
+          const stockColKey = Object.keys(row).find(
+            (k) => k.toLowerCase() === `stok_${outlet.name.toLowerCase()}`
+          )
+          const priceColKey = Object.keys(row).find(
+            (k) => k.toLowerCase() === `harga_${outlet.name.toLowerCase()}`
+          )
+
+          const parsedStock =
+            stockColKey !== undefined && row[stockColKey] !== ''
+              ? Math.max(0, Number(row[stockColKey]) || 0)
+              : null
+          const parsedOutletPrice =
+            priceColKey !== undefined && row[priceColKey] !== '' && Number(row[priceColKey]) > 0
+              ? Number(row[priceColKey])
+              : null
+
+          const { data: existingOutletStock } = await supabase
+            .from('outlet_stocks')
+            .select('id, stock, selling_price')
+            .eq('outlet_id', outlet.id)
+            .eq('product_id', productId)
+            .maybeSingle()
+
+          if (existingOutletStock) {
+            await supabase
+              .from('outlet_stocks')
+              .update({
+                stock: parsedStock !== null ? parsedStock : existingOutletStock.stock,
+                selling_price:
+                  priceColKey !== undefined ? parsedOutletPrice : existingOutletStock.selling_price,
+              })
+              .eq('id', existingOutletStock.id)
+          } else {
+            await supabase.from('outlet_stocks').insert([
+              {
+                outlet_id: outlet.id,
+                product_id: productId,
+                stock: parsedStock ?? 0,
+                selling_price: parsedOutletPrice,
+                min_stock: 3,
+              },
+            ])
+          }
+        }
+
+        successCount++
+      }
+
+      showFeedback('success', `Import selesai! ${successCount} produk berhasil diproses dari Excel.`)
+      fetchMasterData()
+    } catch (err: any) {
+      showFeedback('error', `Gagal import Excel: ${err.message || 'Format file tidak sesuai'}`)
+    } finally {
+      setImporting(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
   }
 
   // 1. TAMBAH PRODUK BARU
@@ -150,31 +426,7 @@ export default function MasterProductsPage() {
     setFeedback(null)
 
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser()
-      if (!user) throw new Error('Sesi login tidak ditemukan, silakan login ulang.')
-
-      // Cari company_id lewat ID user, fallback lewat email
-      let companyId: string | null = null
-      const { data: profileById } = await supabase
-        .from('users')
-        .select('company_id')
-        .eq('id', user.id)
-        .maybeSingle()
-
-      if (profileById?.company_id) {
-        companyId = profileById.company_id
-      } else if (user.email) {
-        const { data: profileByEmail } = await supabase
-          .from('users')
-          .select('company_id')
-          .eq('email', user.email)
-          .maybeSingle()
-        companyId = profileByEmail?.company_id || null
-      }
-
-      if (!companyId) throw new Error('Company ID tidak ditemukan pada akun Admin ini.')
+      const companyId = await getAdminCompanyId()
 
       const { data: newProd, error: prodError } = await supabase
         .from('products')
@@ -195,14 +447,21 @@ export default function MasterProductsPage() {
 
       if (prodError) throw prodError
 
-      // Bulk insert stok awal untuk seluruh cabang sekaligus
+      // Bulk insert stok awal & harga khusus cabang
       if (newProd && outlets.length > 0) {
-        const stockRows = outlets.map((outlet) => ({
-          outlet_id: outlet.id,
-          product_id: newProd.id,
-          stock: initialStocks[outlet.id] || 0,
-          min_stock: 3,
-        }))
+        const stockRows = outlets.map((outlet) => {
+          const customPriceStr = initialOutletPrices[outlet.id]
+          const customPriceVal =
+            customPriceStr && Number(customPriceStr) > 0 ? Number(customPriceStr) : null
+
+          return {
+            outlet_id: outlet.id,
+            product_id: newProd.id,
+            stock: initialStocks[outlet.id] || 0,
+            selling_price: customPriceVal,
+            min_stock: 3,
+          }
+        })
 
         const { error: stockError } = await supabase.from('outlet_stocks').insert(stockRows)
         if (stockError) throw stockError
@@ -217,6 +476,7 @@ export default function MasterProductsPage() {
       setCostPrice('')
       setUnit('kaleng')
       setInitialStocks({})
+      setInitialOutletPrices({})
       fetchMasterData()
     } catch (err: any) {
       showFeedback('error', `Gagal menambah produk: ${err.message || 'Terjadi kesalahan'}`)
@@ -236,18 +496,27 @@ export default function MasterProductsPage() {
     setEditCostPrice(String(prod.cost_price ?? 0))
     setEditUnit(prod.unit || 'kaleng')
 
-    const { data: stockData } = await supabase
-      .from('outlet_stocks')
-      .select('outlet_id, stock')
-      .eq('product_id', prod.id)
+    const outletIds = outlets.map((o) => o.id)
+    const { data: stockData } =
+      outletIds.length > 0
+        ? await supabase
+            .from('outlet_stocks')
+            .select('outlet_id, stock, selling_price')
+            .eq('product_id', prod.id)
+            .in('outlet_id', outletIds)
+        : { data: [] }
 
     const stockMap: Record<string, number> = {}
+    const priceMap: Record<string, string> = {}
     if (stockData) {
       stockData.forEach((s: any) => {
         stockMap[s.outlet_id] = Number(s.stock || 0)
+        priceMap[s.outlet_id] =
+          s.selling_price !== null && s.selling_price !== undefined ? String(s.selling_price) : ''
       })
     }
     setEditStocks(stockMap)
+    setEditOutletPrices(priceMap)
   }
 
   // 3. SIMPAN UPDATE PRODUK
@@ -275,6 +544,9 @@ export default function MasterProductsPage() {
 
       for (const outlet of outlets) {
         const newStockQty = editStocks[outlet.id] ?? 0
+        const customPriceStr = editOutletPrices[outlet.id]
+        const customPriceVal =
+          customPriceStr && Number(customPriceStr) > 0 ? Number(customPriceStr) : null
 
         const { data: existingStock } = await supabase
           .from('outlet_stocks')
@@ -286,7 +558,7 @@ export default function MasterProductsPage() {
         if (existingStock) {
           await supabase
             .from('outlet_stocks')
-            .update({ stock: newStockQty })
+            .update({ stock: newStockQty, selling_price: customPriceVal })
             .eq('id', existingStock.id)
         } else {
           await supabase.from('outlet_stocks').insert([
@@ -294,13 +566,14 @@ export default function MasterProductsPage() {
               outlet_id: outlet.id,
               product_id: editingProduct.id,
               stock: newStockQty,
+              selling_price: customPriceVal,
               min_stock: 3,
             },
           ])
         }
       }
 
-      showFeedback('success', `Data produk "${editName.trim()}" & stok berhasil diperbarui!`)
+      showFeedback('success', `Data produk "${editName.trim()}" & harga/stok cabang diperbarui!`)
       setEditingProduct(null)
       fetchMasterData()
     } catch (err: any) {
@@ -353,15 +626,58 @@ export default function MasterProductsPage() {
 
   return (
     <div className="p-3 min-[375px]:p-4 sm:p-6 lg:p-8 pb-24 md:pb-8 max-w-7xl mx-auto space-y-5 sm:space-y-7">
-      {/* HEADER */}
-      <div>
-        <h1 className="text-lg min-[375px]:text-xl sm:text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
-          <Boxes className="w-5 h-5 sm:w-6 sm:h-6 text-blue-600 shrink-0" />
-          <span>Katalog Produk Master & Alokasi Stok</span>
-        </h1>
-        <p className="text-[11px] sm:text-xs text-slate-500 mt-1">
-          Kelola katalog produk terpusat, ubah harga, kategori, dan atur distribusi stok fisik per cabang.
-        </p>
+      {/* HEADER + EXCEL IMPORT/EXPORT ACTIONS */}
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3.5">
+        <div>
+          <h1 className="text-lg min-[375px]:text-xl sm:text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
+            <Boxes className="w-5 h-5 sm:w-6 sm:h-6 text-blue-600 shrink-0" />
+            <span>Katalog Produk Master & Alokasi Stok</span>
+          </h1>
+          <p className="text-[11px] sm:text-xs text-slate-500 mt-1">
+            Kelola katalog terpusat, satuan kiloan/literan, harga khusus tiap cabang, dan import/export Excel.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleDownloadTemplate}
+            className="px-3 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-semibold transition inline-flex items-center gap-1.5 shadow-2xs"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5 text-slate-500" />
+            <span>Template Excel</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleExportExcel}
+            className="px-3 py-2 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 text-emerald-700 rounded-xl text-xs font-semibold transition inline-flex items-center gap-1.5"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>Export Excel</span>
+          </button>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            onChange={handleImportExcel}
+            className="hidden"
+          />
+          <button
+            type="button"
+            disabled={importing}
+            onClick={() => fileInputRef.current?.click()}
+            className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold transition inline-flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+          >
+            {importing ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Upload className="w-3.5 h-3.5" />
+            )}
+            <span>{importing ? 'Mengimpor...' : 'Import Excel'}</span>
+          </button>
+        </div>
       </div>
 
       {/* FEEDBACK BANNER */}
@@ -419,7 +735,7 @@ export default function MasterProductsPage() {
             <input
               type="text"
               required
-              placeholder="Kuas Cat Eterna 3 Inch / Nippon Paint 5L"
+              placeholder="Cat Tembok Oplosan / Thinner A Special"
               value={name}
               onChange={(e) => setName(e.target.value)}
               className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:bg-white focus:border-blue-500 transition"
@@ -456,7 +772,7 @@ export default function MasterProductsPage() {
 
           <div>
             <label className="block text-xs font-semibold text-slate-600 mb-1">
-              Harga Jual (Rp) *
+              Harga Jual Default (Rp) *
             </label>
             <input
               type="number"
@@ -486,7 +802,7 @@ export default function MasterProductsPage() {
 
           <div>
             <label className="block text-xs font-semibold text-slate-600 mb-1">
-              Satuan Kemasan *
+              Satuan Jual / Kemasan *
             </label>
             <select
               value={unit}
@@ -502,24 +818,53 @@ export default function MasterProductsPage() {
           </div>
         </div>
 
-        {/* Input Alokasi Stok Awal Per Cabang */}
+        {/* Input Alokasi Stok Awal & Harga Khusus Per Cabang */}
         {outlets.length > 0 && (
           <div className="bg-slate-50 border border-slate-200/70 p-3.5 sm:p-4 rounded-xl space-y-3">
-            <p className="text-xs font-bold text-slate-700">Alokasi Stok Awal per Cabang:</p>
-            <div className="grid grid-cols-1 min-[420px]:grid-cols-2 md:grid-cols-3 gap-3">
+            <div>
+              <p className="text-xs font-bold text-slate-700">
+                Alokasi Stok Awal & Harga Khusus per Cabang:
+              </p>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Kosongkan kolom harga cabang jika ingin mengikuti Harga Jual Default di atas.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               {outlets.map((outlet) => (
-                <div key={outlet.id}>
-                  <label className="block text-[11px] font-medium text-slate-500 mb-1 truncate">
-                    Stok di {outlet.name}
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    placeholder="0"
-                    value={initialStocks[outlet.id] || ''}
-                    onChange={(e) => handleStockChange(outlet.id, e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white text-slate-800 focus:outline-none focus:border-blue-500 transition"
-                  />
+                <div
+                  key={outlet.id}
+                  className="bg-white border border-slate-200/80 p-3 rounded-xl space-y-2"
+                >
+                  <p className="text-xs font-bold text-slate-800 truncate">{outlet.name}</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-medium text-slate-500 mb-1">
+                        Stok Awal ({unit})
+                      </label>
+                      <input
+                        type="number"
+                        step="any"
+                        min="0"
+                        placeholder="0"
+                        value={initialStocks[outlet.id] || ''}
+                        onChange={(e) => handleStockChange(outlet.id, e.target.value)}
+                        className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-800 focus:outline-none focus:bg-white focus:border-blue-500 transition"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-medium text-slate-500 mb-1">
+                        Harga Cabang (Rp)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="Ikut default"
+                        value={initialOutletPrices[outlet.id] || ''}
+                        onChange={(e) => handleOutletPriceChange(outlet.id, e.target.value)}
+                        className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-800 focus:outline-none focus:bg-white focus:border-blue-500 transition"
+                      />
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
@@ -598,7 +943,7 @@ export default function MasterProductsPage() {
             </p>
             <p className="text-[11px] text-slate-400">
               {products.length === 0
-                ? 'Tambahkan produk pertama Anda menggunakan formulir di atas.'
+                ? 'Tambahkan produk pertama Anda menggunakan formulir di atas atau Import Excel.'
                 : 'Coba ubah kata kunci pencarian atau pilih kategori lain.'}
             </p>
           </div>
@@ -623,14 +968,14 @@ export default function MasterProductsPage() {
                       </h3>
                       <p className="text-[11px] text-slate-500 mt-0.5">
                         Brand: <span className="font-medium text-slate-700">{p.brand || '-'}</span> •{' '}
-                        <span className="capitalize">{p.unit || 'pcs'}</span>
+                        <span className="uppercase font-semibold">{p.unit || 'pcs'}</span>
                       </p>
                     </div>
                   </div>
 
                   <div className="flex items-center justify-between gap-2 bg-slate-50 p-2.5 rounded-xl text-[11px]">
                     <div>
-                      <p className="text-[10px] text-slate-400">Harga Jual</p>
+                      <p className="text-[10px] text-slate-400">Harga Default</p>
                       <p className="font-bold text-slate-900 mt-0.5">
                         Rp {Number(p.price).toLocaleString('id-ID')}
                       </p>
@@ -649,7 +994,7 @@ export default function MasterProductsPage() {
                       className="flex-1 inline-flex items-center justify-center gap-1 py-2 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl font-semibold text-xs hover:bg-amber-100 active:scale-[0.98] transition"
                     >
                       <Pencil className="w-3.5 h-3.5" />
-                      <span>Edit & Stok</span>
+                      <span>Edit Harga & Stok</span>
                     </button>
                     <button
                       onClick={() => setConfirmDelete({ id: p.id, name: p.name })}
@@ -672,7 +1017,7 @@ export default function MasterProductsPage() {
                     <th className="py-3.5 px-5">Nama Produk</th>
                     <th className="py-3.5 px-5">Kategori</th>
                     <th className="py-3.5 px-5">Brand</th>
-                    <th className="py-3.5 px-5 text-right">Harga Jual</th>
+                    <th className="py-3.5 px-5 text-right">Harga Default</th>
                     <th className="py-3.5 px-5 text-right">HPP</th>
                     <th className="py-3.5 px-5 text-center">Aksi</th>
                   </tr>
@@ -685,7 +1030,7 @@ export default function MasterProductsPage() {
                       </td>
                       <td className="py-3.5 px-5 font-bold text-slate-900">
                         <div>{p.name}</div>
-                        <span className="text-[10px] font-normal text-slate-400 capitalize">
+                        <span className="text-[10px] font-medium text-slate-400 uppercase">
                           Satuan: {p.unit || 'pcs'}
                         </span>
                       </td>
@@ -734,7 +1079,7 @@ export default function MasterProductsPage() {
           <div className="bg-white rounded-2xl p-4 min-[375px]:p-5 sm:p-6 max-w-2xl w-full space-y-4 shadow-xl max-h-[90dvh] overflow-y-auto border border-slate-200">
             <div className="flex justify-between items-center border-b border-slate-100 pb-3">
               <h3 className="text-sm font-bold text-slate-900">
-                Edit Master Produk & Stok Cabang
+                Edit Master Produk, Harga & Stok Cabang
               </h3>
               <button
                 onClick={() => setEditingProduct(null)}
@@ -821,7 +1166,7 @@ export default function MasterProductsPage() {
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 mb-1">
-                    Harga Jual Baru (Rp) *
+                    Harga Jual Default (Rp) *
                   </label>
                   <input
                     type="number"
@@ -848,25 +1193,54 @@ export default function MasterProductsPage() {
                 </div>
               </div>
 
-              {/* Edit Stok fisik per cabang */}
+              {/* Edit Stok & Harga Khusus per cabang */}
               {outlets.length > 0 && (
                 <div className="bg-slate-50 border border-slate-200/70 p-3.5 sm:p-4 rounded-xl space-y-3">
-                  <p className="text-xs font-bold text-slate-700">
-                    Penyesuaian Stok Fisik per Cabang:
-                  </p>
-                  <div className="grid grid-cols-1 min-[420px]:grid-cols-2 md:grid-cols-3 gap-3">
+                  <div>
+                    <p className="text-xs font-bold text-slate-700">
+                      Penyesuaian Stok & Harga Jual per Cabang:
+                    </p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Kosongkan harga cabang jika ingin mengikuti Harga Jual Default.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                     {outlets.map((outlet) => (
-                      <div key={outlet.id}>
-                        <label className="block text-[11px] font-medium text-slate-500 mb-1 truncate">
-                          Stok di {outlet.name}
-                        </label>
-                        <input
-                          type="number"
-                          min="0"
-                          value={editStocks[outlet.id] ?? 0}
-                          onChange={(e) => handleEditStockChange(outlet.id, e.target.value)}
-                          className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white text-slate-800 focus:outline-none focus:border-blue-500 transition"
-                        />
+                      <div
+                        key={outlet.id}
+                        className="bg-white border border-slate-200/80 p-3 rounded-xl space-y-2"
+                      >
+                        <p className="text-xs font-bold text-slate-800 truncate">{outlet.name}</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[10px] font-medium text-slate-500 mb-1">
+                              Stok ({editUnit})
+                            </label>
+                            <input
+                              type="number"
+                              step="any"
+                              min="0"
+                              value={editStocks[outlet.id] ?? 0}
+                              onChange={(e) => handleEditStockChange(outlet.id, e.target.value)}
+                              className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-800 focus:outline-none focus:bg-white focus:border-blue-500 transition"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-medium text-slate-500 mb-1">
+                              Harga Cabang
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              placeholder="Default"
+                              value={editOutletPrices[outlet.id] ?? ''}
+                              onChange={(e) =>
+                                handleEditOutletPriceChange(outlet.id, e.target.value)
+                              }
+                              className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-slate-50 text-slate-800 focus:outline-none focus:bg-white focus:border-blue-500 transition"
+                            />
+                          </div>
+                        </div>
                       </div>
                     ))}
                   </div>

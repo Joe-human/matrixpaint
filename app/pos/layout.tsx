@@ -12,40 +12,59 @@ export default function POSLayout({ children }: { children: React.ReactNode }) {
     let isMounted = true
 
     const checkAccess = async () => {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession()
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession()
 
-      if (!session) {
-        router.replace('/login')
-        return
+        if (!session) {
+          if (isMounted) router.replace('/login')
+          return
+        }
+
+        const { data: userData, error } = await supabase
+          .from('users')
+          .select('role')
+          .eq('email', session.user.email)
+          .single()
+
+        if (!isMounted) return
+
+        if (error || !userData) {
+          router.replace('/login')
+          return
+        }
+
+        const role = userData.role?.toLowerCase()
+
+        if (role !== 'cashier') {
+          if (role === 'owner') router.replace('/dashboard/owner')
+          else if (role === 'admin') router.replace('/dashboard/admin')
+          else if (role === 'inventory') router.replace('/inventory')
+          else router.replace('/login')
+          return
+        }
+
+        setAuthorized(true)
+      } catch {
+        if (isMounted) router.replace('/login')
       }
-
-      const { data: userData } = await supabase
-        .from('users')
-        .select('role')
-        .eq('email', session.user.email)
-        .single()
-
-      if (!isMounted) return
-
-      const role = userData?.role?.toLowerCase()
-
-      if (role !== 'cashier') {
-        if (role === 'owner') router.replace('/dashboard/owner')
-        else if (role === 'admin') router.replace('/dashboard/admin')
-        else if (role === 'inventory') router.replace('/inventory')
-        else router.replace('/login')
-        return
-      }
-
-      setAuthorized(true)
     }
 
     checkAccess()
 
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_OUT' && isMounted) {
+        setAuthorized(false)
+        router.replace('/login')
+      }
+    })
+
     return () => {
       isMounted = false
+      subscription.unsubscribe()
     }
   }, [router])
 

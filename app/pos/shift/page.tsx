@@ -25,10 +25,10 @@ interface ShiftData {
   cashier_id: string
   outlet_id: string
   start_time: string
-  end_time?: string
+  end_time?: string | null
   initial_cash: number
-  final_cash?: number
-  expected_cash?: number
+  final_cash?: number | null
+  expected_cash?: number | null
   status: 'open' | 'closed'
 }
 
@@ -231,7 +231,7 @@ export default function POSShiftPage() {
 
     const expectedCash = Math.max(
       0,
-      Number(activeShift.initial_cash) + cashSales - operationalExpenses
+      Number(activeShift.initial_cash || 0) + cashSales - operationalExpenses
     )
     const actualCash = Number(actualCashInput) || 0
 
@@ -265,8 +265,9 @@ export default function POSShiftPage() {
     }
   }
 
+  const openingCashDisplay = Number(activeShift?.initial_cash || 0)
   const expectedCashTotal = activeShift
-    ? Math.max(0, Number(activeShift.initial_cash) + cashSales - operationalExpenses)
+    ? Math.max(0, openingCashDisplay + cashSales - operationalExpenses)
     : 0
   const actualCashNum = Number(actualCashInput) || 0
   const cashDifference = actualCashNum - expectedCashTotal
@@ -432,7 +433,7 @@ export default function POSShiftPage() {
                 <Wallet className="w-4 h-4 text-slate-400 shrink-0" />
               </div>
               <p className="text-base sm:text-lg font-extrabold text-slate-900 mt-2 truncate">
-                Rp {Number(activeShift.initial_cash).toLocaleString('id-ID')}
+                Rp {openingCashDisplay.toLocaleString('id-ID')}
               </p>
             </div>
 
@@ -495,7 +496,7 @@ export default function POSShiftPage() {
               <div className="flex justify-between items-center gap-2">
                 <span className="text-slate-500">Modal Awal Laci</span>
                 <span className="font-semibold text-slate-700">
-                  Rp {Number(activeShift.initial_cash).toLocaleString('id-ID')}
+                  Rp {openingCashDisplay.toLocaleString('id-ID')}
                 </span>
               </div>
               <div className="flex justify-between items-center gap-2">
